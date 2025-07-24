@@ -6,6 +6,7 @@ import React, { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Dimensions,
+  Platform,
   RefreshControl,
   SafeAreaView,
   ScrollView,
@@ -45,6 +46,52 @@ const generateCartagenaTestLocation = () => {
   return { latitude: lat, longitude: lng };
 };
 
+// Generar datos aleatorios de prueba
+const generateRandomTestData = () => {
+  const testScenarios = [
+    { name: "Centro Histórico", lat: 10.4236, lng: -75.5378 },
+    { name: "Bocagrande", lat: 10.3997, lng: -75.5513 },
+    { name: "Castillo San Felipe", lat: 10.4219, lng: -75.5433 },
+    { name: "Getsemaní", lat: 10.42, lng: -75.55 },
+    { name: "La Matuna", lat: 10.418, lng: -75.542 },
+    { name: "Manga", lat: 10.405, lng: -75.525 },
+    { name: "Pie de la Popa", lat: 10.41, lng: -75.53 },
+    { name: "Crespo", lat: 10.43, lng: -75.52 },
+  ];
+
+  const randomScenario =
+    testScenarios[Math.floor(Math.random() * testScenarios.length)];
+  const randomOffset = 0.002;
+
+  return {
+    latitude: randomScenario.lat + (Math.random() - 0.5) * randomOffset,
+    longitude: randomScenario.lng + (Math.random() - 0.5) * randomOffset,
+    name: randomScenario.name,
+    accuracy: Math.floor(Math.random() * 20) + 5,
+    speed: Math.random() * 50,
+  };
+};
+
+// Generar rutas aleatorias de prueba
+const generateRandomRoute = (startLocation: any, duration: number = 10) => {
+  const route = [startLocation];
+  let currentLat = startLocation.latitude;
+  let currentLng = startLocation.longitude;
+
+  for (let i = 1; i < duration; i++) {
+    currentLat += (Math.random() - 0.5) * 0.001;
+    currentLng += (Math.random() - 0.5) * 0.001;
+
+    route.push({
+      latitude: currentLat,
+      longitude: currentLng,
+      timestamp: new Date(Date.now() + i * 30000).toISOString(),
+    });
+  }
+
+  return route;
+};
+
 // Interfaces
 interface LocationData {
   latitude: number;
@@ -57,7 +104,7 @@ interface LocationData {
 
 interface SentLocation extends LocationData {
   id: string;
-  type: "manual" | "auto" | "test";
+  type: "manual" | "auto" | "test" | "random";
 }
 
 interface SessionStats {
@@ -67,13 +114,13 @@ interface SessionStats {
   avgAccuracy: number;
   totalDistance: number;
   isActive: boolean;
+  randomDataGenerated: number;
 }
 
 const WEBSOCKET_URL = `${process.env.EXPO_PUBLIC_BASE_URL}/locations`;
 
 export default function DriverScreen() {
   const { user, logout } = useAuth();
-  console.log(user);
 
   // Estados principales
   const [isConnected, setIsConnected] = useState(false);
@@ -84,11 +131,18 @@ export default function DriverScreen() {
   const [connectionStatus, setConnectionStatus] = useState("Desconectado");
   const [refreshing, setRefreshing] = useState(false);
 
+  // ✅ NUEVO: Estado para mapa expandido
+  const [isMapExpanded, setIsMapExpanded] = useState(false);
+
   // Estados de configuración
-  const [trackingInterval, setTrackingInterval] = useState(5); // segundos
+  const [trackingInterval, setTrackingInterval] = useState(5);
   const [permissionStatus, setPermissionStatus] = useState<
     "granted" | "denied" | "undetermined"
   >("undetermined");
+
+  // Estados de datos aleatorios
+  const [isGeneratingRandomData, setIsGeneratingRandomData] = useState(false);
+  const [randomDataInterval, setRandomDataInterval] = useState(3);
 
   // Estados de historial y estadísticas
   const [sentLocations, setSentLocations] = useState<SentLocation[]>([]);
@@ -99,6 +153,7 @@ export default function DriverScreen() {
     avgAccuracy: 0,
     totalDistance: 0,
     isActive: false,
+    randomDataGenerated: 0,
   });
 
   // Referencias
@@ -107,68 +162,122 @@ export default function DriverScreen() {
     null
   );
   const trackingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const randomDataIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const mapRef = useRef<MapView>(null);
   const lastLocationRef = useRef<LocationData | null>(null);
 
-  const vehicleId = user?.vehicleId;
+  // ✅ CORREGIDO: Acceso directo a vehicleId sin validación anidada
+  const vehicleId = user?.vehicleId || "driver-mobile";
 
   // ✅ SOLICITAR PERMISOS AL INICIAR
   useEffect(() => {
-    requestLocationPermissions();
+    initializePermissions();
     return () => {
       cleanup();
     };
   }, []);
 
+  // ✅ FUNCIÓN: Inicializar permisos
+  const initializePermissions = async () => {
+    try {
+      console.log("🔍 Verificando permisos de ubicación...");
+
+      const { status: currentStatus } =
+        await Location.getForegroundPermissionsAsync();
+      console.log("📍 Estado actual de permisos:", currentStatus);
+
+      if (currentStatus === "granted") {
+        setPermissionStatus("granted");
+        console.log("✅ Permisos ya concedidos");
+        await getCurrentLocation();
+      } else {
+        setPermissionStatus(currentStatus);
+        console.log("⚠️ Permisos no concedidos, solicitando...");
+
+        setTimeout(() => {
+          showPermissionDialog();
+        }, 1000);
+      }
+    } catch (error) {
+      console.error("❌ Error verificando permisos:", error);
+      setPermissionStatus("denied");
+    }
+  };
+
+  // ✅ FUNCIÓN: Diálogo de permisos
+  const showPermissionDialog = () => {
+    Alert.alert(
+      "📍 Permisos de Ubicación Requeridos",
+      "Esta aplicación necesita acceso a tu ubicación para:\n\n• Enviar tu posición en tiempo real\n• Mostrar tu ubicación en el mapa\n• Generar rutas y estadísticas\n\n¿Deseas conceder permisos?",
+      [
+        {
+          text: "Ahora No",
+          style: "cancel",
+          onPress: () => {
+            setPermissionStatus("denied");
+            console.log("❌ Usuario rechazó permisos");
+          },
+        },
+        {
+          text: "Conceder Permisos",
+          onPress: async () => {
+            await requestLocationPermissions();
+          },
+        },
+      ],
+      { cancelable: false }
+    );
+  };
+
   // ✅ FUNCIÓN: Solicitar permisos de ubicación
   const requestLocationPermissions = async () => {
     try {
-      // Verificar permisos actuales
-      const { status: foregroundStatus } =
-        await Location.getForegroundPermissionsAsync();
+      console.log("🔄 Solicitando permisos...");
 
-      if (foregroundStatus !== "granted") {
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      console.log("📱 Respuesta de permisos:", status);
+
+      setPermissionStatus(status);
+
+      if (status === "granted") {
+        console.log("✅ Permisos concedidos exitosamente");
         Alert.alert(
-          "📍 Permisos de Ubicación",
-          "Esta aplicación necesita acceso a tu ubicación para funcionar correctamente. ¿Deseas conceder permisos?",
+          "✅ ¡Permisos Concedidos!",
+          "Ahora puedes usar todas las funciones de tracking GPS.",
+          [{ text: "Continuar", onPress: () => getCurrentLocation() }]
+        );
+      } else {
+        console.log("❌ Permisos denegados");
+        Alert.alert(
+          "❌ Permisos Denegados",
+          "Sin permisos de ubicación, algunas funciones no estarán disponibles.\n\nPuedes habilitarlos más tarde desde Configuración.",
           [
+            { text: "Entendido", style: "cancel" },
             {
-              text: "No",
-              style: "cancel",
-              onPress: () => setPermissionStatus("denied"),
-            },
-            {
-              text: "Sí",
-              onPress: async () => {
-                const { status } =
-                  await Location.requestForegroundPermissionsAsync();
-                setPermissionStatus(status);
-
-                if (status === "granted") {
+              text: "Ir a Configuración",
+              onPress: () => {
+                if (Platform.OS === "ios") {
                   Alert.alert(
-                    "✅ Permisos Concedidos",
-                    "Ya puedes usar todas las funciones de tracking GPS."
+                    "Configuración",
+                    "Ve a Configuración > Privacidad > Servicios de Ubicación"
                   );
-                  await getCurrentLocation();
                 } else {
                   Alert.alert(
-                    "❌ Permisos Denegados",
-                    "Sin permisos de ubicación, algunas funciones no estarán disponibles."
+                    "Configuración",
+                    "Ve a Configuración > Apps > Permisos > Ubicación"
                   );
                 }
               },
             },
           ]
         );
-      } else {
-        setPermissionStatus("granted");
-        await getCurrentLocation();
       }
     } catch (error) {
-      console.error("Error solicitando permisos:", error);
+      console.error("❌ Error solicitando permisos:", error);
+      setPermissionStatus("denied");
       Alert.alert(
         "Error",
-        "No se pudieron verificar los permisos de ubicación"
+        "No se pudieron solicitar los permisos de ubicación"
       );
     }
   };
@@ -176,6 +285,7 @@ export default function DriverScreen() {
   // ✅ FUNCIÓN: Obtener ubicación actual
   const getCurrentLocation = async (): Promise<LocationData | null> => {
     if (permissionStatus !== "granted") {
+      console.log("⚠️ Permisos no concedidos para obtener ubicación");
       Alert.alert(
         "❌ Permisos Requeridos",
         "Necesitas conceder permisos de ubicación primero."
@@ -184,10 +294,14 @@ export default function DriverScreen() {
     }
 
     try {
+      console.log("📍 Obteniendo ubicación actual...");
+
       const location = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.High,
         timeInterval: 1000,
       });
+
+      console.log("✅ Ubicación obtenida:", location.coords);
 
       const locationData: LocationData = {
         latitude: location.coords.latitude,
@@ -200,10 +314,15 @@ export default function DriverScreen() {
 
       setCurrentLocation(location);
       lastLocationRef.current = locationData;
+
+      console.log("📍 Ubicación actualizada en el estado");
       return locationData;
     } catch (error) {
-      console.error("Error obteniendo ubicación:", error);
-      Alert.alert("❌ Error", "No se pudo obtener la ubicación actual");
+      console.error("❌ Error obteniendo ubicación:", error);
+      Alert.alert(
+        "❌ Error",
+        "No se pudo obtener la ubicación actual. Asegúrate de tener GPS activado."
+      );
       return null;
     }
   };
@@ -257,6 +376,7 @@ export default function DriverScreen() {
         setIsConnected(false);
         setConnectionStatus(`Desconectado: ${reason}`);
         stopTracking();
+        stopRandomDataGeneration();
 
         Alert.alert(
           "🔌 Desconectado",
@@ -270,11 +390,6 @@ export default function DriverScreen() {
         setIsConnecting(false);
         setConnectionStatus(`Error: ${error.message}`);
         Alert.alert("❌ Error de Conexión", error.message);
-      });
-
-      socket.on("error", (errorData) => {
-        console.error("❌ Error del servidor:", errorData);
-        Alert.alert("❌ Error", errorData.message || "Error del servidor");
       });
     } catch (error) {
       console.error("Error conectando:", error);
@@ -293,17 +408,18 @@ export default function DriverScreen() {
     setIsConnected(false);
     setConnectionStatus("Desconectado");
     stopTracking();
+    stopRandomDataGeneration();
     setSessionStats((prev) => ({ ...prev, isActive: false }));
   };
 
-  // ✅ FUNCIÓN: Calcular distancia entre dos puntos
+  // ✅ FUNCIÓN: Calcular distancia
   const calculateDistance = (
     lat1: number,
     lon1: number,
     lat2: number,
     lon2: number
   ): number => {
-    const R = 6371; // Radio de la Tierra en km
+    const R = 6371;
     const dLat = ((lat2 - lat1) * Math.PI) / 180;
     const dLon = ((lon2 - lon1) * Math.PI) / 180;
     const a =
@@ -313,13 +429,13 @@ export default function DriverScreen() {
         Math.sin(dLon / 2) *
         Math.sin(dLon / 2);
     const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c * 1000; // Convertir a metros
+    return R * c * 1000;
   };
 
   // ✅ FUNCIÓN: Enviar ubicación al servidor
   const sendLocation = (
     locationData: LocationData,
-    type: "manual" | "auto" | "test" = "auto"
+    type: "manual" | "auto" | "test" | "random" = "auto"
   ) => {
     if (!socketRef.current?.connected) {
       Alert.alert("❌ Error", "No hay conexión al servidor");
@@ -338,7 +454,6 @@ export default function DriverScreen() {
 
     socketRef.current.emit("sendLocation", payload);
 
-    // Agregar al historial
     const sentLocation: SentLocation = {
       ...locationData,
       id: Date.now().toString(),
@@ -347,7 +462,6 @@ export default function DriverScreen() {
 
     setSentLocations((prev) => [sentLocation, ...prev.slice(0, 99)]);
 
-    // Actualizar estadísticas
     setSessionStats((prev) => {
       const newStats = {
         ...prev,
@@ -359,7 +473,10 @@ export default function DriverScreen() {
             : (prev.avgAccuracy + (locationData.accuracy || 0)) / 2,
       };
 
-      // Calcular distancia recorrida
+      if (type === "random") {
+        newStats.randomDataGenerated = prev.randomDataGenerated + 1;
+      }
+
       if (lastLocationRef.current && lastLocationRef.current !== locationData) {
         const distance = calculateDistance(
           lastLocationRef.current.latitude,
@@ -386,7 +503,14 @@ export default function DriverScreen() {
     if (permissionStatus !== "granted") {
       Alert.alert(
         "❌ Permisos Requeridos",
-        "Necesitas permisos de ubicación para usar el tracking"
+        "Necesitas permisos de ubicación para usar el tracking",
+        [
+          { text: "Cancelar", style: "cancel" },
+          {
+            text: "Solicitar Permisos",
+            onPress: () => requestLocationPermissions(),
+          },
+        ]
       );
       return;
     }
@@ -394,18 +518,16 @@ export default function DriverScreen() {
     try {
       setIsTracking(true);
 
-      // Obtener ubicación inicial
       const initialLocation = await getCurrentLocation();
       if (initialLocation) {
         sendLocation(initialLocation, "auto");
       }
 
-      // Configurar tracking continuo
       const subscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.High,
           timeInterval: trackingInterval * 1000,
-          distanceInterval: 5, // 5 metros
+          distanceInterval: 5,
         },
         (location) => {
           setCurrentLocation(location);
@@ -424,7 +546,6 @@ export default function DriverScreen() {
 
       locationSubscription.current = subscription;
 
-      // Backup con setInterval
       trackingIntervalRef.current = setInterval(async () => {
         const location = await getCurrentLocation();
         if (location) {
@@ -458,6 +579,133 @@ export default function DriverScreen() {
     }
   };
 
+  // ✅ FUNCIÓN: Iniciar generación de datos aleatorios
+  const startRandomDataGeneration = () => {
+    if (!isConnected) {
+      Alert.alert("❌ Error", "Primero debes conectarte al servidor");
+      return;
+    }
+
+    setIsGeneratingRandomData(true);
+
+    randomDataIntervalRef.current = setInterval(() => {
+      const randomData = generateRandomTestData();
+      const locationData: LocationData = {
+        latitude: randomData.latitude,
+        longitude: randomData.longitude,
+        accuracy: randomData.accuracy,
+        timestamp: new Date().toISOString(),
+        speed: randomData.speed,
+      };
+
+      const fakeLocationObject: Location.LocationObject = {
+        coords: {
+          latitude: locationData.latitude,
+          longitude: locationData.longitude,
+          altitude: 0,
+          accuracy: locationData.accuracy || 15,
+          altitudeAccuracy: null,
+          heading: null,
+          speed: locationData.speed || null,
+        },
+        timestamp: Date.now(),
+      };
+
+      setCurrentLocation(fakeLocationObject);
+      sendLocation(locationData, "random");
+
+      if (Math.random() < 0.3 && mapRef.current) {
+        mapRef.current.animateToRegion(
+          {
+            latitude: locationData.latitude,
+            longitude: locationData.longitude,
+            latitudeDelta: 0.01,
+            longitudeDelta: 0.01,
+          },
+          1000
+        );
+      }
+    }, randomDataInterval * 1000);
+
+    Alert.alert(
+      "🎲 Datos Aleatorios Iniciados",
+      `Generando y enviando ubicaciones aleatorias cada ${randomDataInterval} segundos en Cartagena`
+    );
+  };
+
+  // ✅ FUNCIÓN: Detener generación de datos aleatorios
+  const stopRandomDataGeneration = () => {
+    setIsGeneratingRandomData(false);
+
+    if (randomDataIntervalRef.current) {
+      clearInterval(randomDataIntervalRef.current);
+      randomDataIntervalRef.current = null;
+    }
+  };
+
+  // ✅ FUNCIÓN: Generar ruta aleatoria completa
+  const generateAndSendRandomRoute = async () => {
+    if (!isConnected) {
+      Alert.alert("❌ Error", "Primero debes conectarte al servidor");
+      return;
+    }
+
+    const startLocation = generateRandomTestData();
+    const route = generateRandomRoute(startLocation, 8);
+
+    Alert.alert(
+      "🗺️ Generando Ruta Aleatoria",
+      `Se enviará una ruta de ${route.length} puntos en ${route.length * 2} segundos`,
+      [
+        { text: "Cancelar", style: "cancel" },
+        {
+          text: "Enviar",
+          onPress: () => {
+            route.forEach((point, index) => {
+              setTimeout(() => {
+                const locationData: LocationData = {
+                  latitude: point.latitude,
+                  longitude: point.longitude,
+                  accuracy: Math.floor(Math.random() * 15) + 5,
+                  timestamp: new Date().toISOString(),
+                  speed: Math.random() * 40,
+                };
+
+                const fakeLocationObject: Location.LocationObject = {
+                  coords: {
+                    latitude: locationData.latitude,
+                    longitude: locationData.longitude,
+                    altitude: 0,
+                    accuracy: locationData.accuracy || 15,
+                    altitudeAccuracy: null,
+                    heading: null,
+                    speed: locationData.speed || null,
+                  },
+                  timestamp: Date.now(),
+                };
+
+                setCurrentLocation(fakeLocationObject);
+                sendLocation(locationData, "random");
+
+                if (index === 0 && mapRef.current) {
+                  mapRef.current.animateToRegion(
+                    {
+                      latitude: locationData.latitude,
+                      longitude: locationData.longitude,
+                      latitudeDelta: 0.02,
+                      longitudeDelta: 0.02,
+                    },
+                    1000
+                  );
+                }
+              }, index * 2000);
+            });
+          },
+        },
+      ]
+    );
+  };
+
   // ✅ FUNCIÓN: Enviar ubicación manual
   const sendCurrentLocationManually = async () => {
     if (!isConnected) {
@@ -472,7 +720,7 @@ export default function DriverScreen() {
     }
   };
 
-  // ✅ FUNCIÓN: Usar ubicación de prueba en Cartagena
+  // ✅ FUNCIÓN: Usar ubicación de prueba
   const useCartagenaTestLocation = async () => {
     const testCoords = generateCartagenaTestLocation();
     const testLocation: LocationData = {
@@ -482,7 +730,6 @@ export default function DriverScreen() {
       timestamp: new Date().toISOString(),
     };
 
-    // Simular que es la ubicación actual
     const fakeLocationObject: Location.LocationObject = {
       coords: {
         latitude: testLocation.latitude,
@@ -503,7 +750,6 @@ export default function DriverScreen() {
       sendLocation(testLocation, "test");
     }
 
-    // Centrar mapa en la nueva ubicación
     if (mapRef.current) {
       mapRef.current.animateToRegion(
         {
@@ -518,13 +764,11 @@ export default function DriverScreen() {
 
     Alert.alert(
       "🏖️ Ubicación de Prueba",
-      `Ubicación simulada en Cartagena:\nLat: ${testLocation.latitude.toFixed(
-        4
-      )}\nLng: ${testLocation.longitude.toFixed(4)}`
+      `Ubicación simulada en Cartagena:\nLat: ${testLocation.latitude.toFixed(4)}\nLng: ${testLocation.longitude.toFixed(4)}`
     );
   };
 
-  // ✅ FUNCIÓN: Centrar mapa en ubicación actual
+  // ✅ FUNCIÓN: Centrar mapa
   const centerMapOnCurrentLocation = () => {
     if (currentLocation && mapRef.current) {
       mapRef.current.animateToRegion(
@@ -537,6 +781,11 @@ export default function DriverScreen() {
         1000
       );
     }
+  };
+
+  // ✅ NUEVO: Función para toggle del mapa expandido
+  const toggleMapExpansion = () => {
+    setIsMapExpanded(!isMapExpanded);
   };
 
   // ✅ FUNCIÓN: Limpiar historial
@@ -556,6 +805,7 @@ export default function DriverScreen() {
               totalLocationsSent: 0,
               totalDistance: 0,
               avgAccuracy: 0,
+              randomDataGenerated: 0,
             }));
           },
         },
@@ -585,6 +835,7 @@ export default function DriverScreen() {
   // ✅ FUNCIÓN: Cleanup
   const cleanup = () => {
     stopTracking();
+    stopRandomDataGeneration();
     if (socketRef.current) {
       socketRef.current.disconnect();
     }
@@ -611,7 +862,7 @@ export default function DriverScreen() {
     return `${minutes}m`;
   };
 
-  // Generar coordenadas para la ruta del historial
+  // Generar coordenadas para la ruta
   const getRouteCoordinates = () => {
     return sentLocations
       .slice(0, 20)
@@ -623,13 +874,13 @@ export default function DriverScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView className="flex-1 bg-gray-50">
       <StatusBar barStyle="dark-content" backgroundColor="#fff" />
 
-      {/* Mapa */}
+      {/* ✅ MAPA CON FUNCIONALIDAD DE EXPANSIÓN */}
       <MapView
         ref={mapRef}
-        style={styles.map}
+        style={isMapExpanded ? mapStyles.mapExpanded : mapStyles.map}
         initialRegion={CARTAGENA_COORDS}
         region={
           currentLocation
@@ -644,6 +895,11 @@ export default function DriverScreen() {
         showsUserLocation={permissionStatus === "granted"}
         showsMyLocationButton={false}
         followsUserLocation={isTracking}
+        mapType="standard"
+        zoomEnabled={true}
+        scrollEnabled={true}
+        pitchEnabled={true}
+        rotateEnabled={true}
       >
         {/* Marcador de ubicación actual */}
         {currentLocation && (
@@ -651,10 +907,10 @@ export default function DriverScreen() {
             <Marker
               coordinate={currentLocation.coords}
               title="🚗 Mi Ubicación"
-              description={`Precisión: ${Math.round(
-                currentLocation.coords.accuracy || 0
-              )}m`}
-              pinColor={isTracking ? "#34C759" : "#007AFF"}
+              description={`Precisión: ${Math.round(currentLocation.coords.accuracy || 0)}m`}
+              pinColor={
+                isTracking || isGeneratingRandomData ? "#34C759" : "#007AFF"
+              }
             />
 
             {/* Círculo de precisión */}
@@ -662,17 +918,21 @@ export default function DriverScreen() {
               center={currentLocation.coords}
               radius={currentLocation.coords.accuracy || 20}
               strokeColor={
-                isTracking ? "rgba(52, 199, 89, 0.5)" : "rgba(0, 122, 255, 0.5)"
+                isTracking || isGeneratingRandomData
+                  ? "rgba(52, 199, 89, 0.5)"
+                  : "rgba(0, 122, 255, 0.5)"
               }
               fillColor={
-                isTracking ? "rgba(52, 199, 89, 0.2)" : "rgba(0, 122, 255, 0.2)"
+                isTracking || isGeneratingRandomData
+                  ? "rgba(52, 199, 89, 0.2)"
+                  : "rgba(0, 122, 255, 0.2)"
               }
             />
           </>
         )}
 
         {/* Marcadores del historial */}
-        {sentLocations.slice(0, 10).map((location, index) => (
+        {sentLocations.slice(0, 15).map((location, index) => (
           <Marker
             key={location.id}
             coordinate={{
@@ -684,7 +944,9 @@ export default function DriverScreen() {
                 ? "🎯"
                 : location.type === "test"
                   ? "🏖️"
-                  : "📍"
+                  : location.type === "random"
+                    ? "🎲"
+                    : "📍"
             } Ubicación ${location.type}`}
             description={new Date(location.timestamp).toLocaleTimeString()}
             pinColor={
@@ -692,9 +954,11 @@ export default function DriverScreen() {
                 ? "#9F7AEA"
                 : location.type === "test"
                   ? "#F6AD55"
-                  : "#4299E1"
+                  : location.type === "random"
+                    ? "#ED8936"
+                    : "#4299E1"
             }
-            opacity={1 - index * 0.1}
+            opacity={1 - index * 0.05}
           />
         ))}
 
@@ -708,327 +972,427 @@ export default function DriverScreen() {
         )}
       </MapView>
 
-      {/* Botón flotante para centrar mapa */}
-      <TouchableOpacity
-        style={styles.centerButton}
-        onPress={centerMapOnCurrentLocation}
-        disabled={!currentLocation}
-      >
-        <Ionicons
-          name="locate"
-          size={24}
-          color={currentLocation ? "#007AFF" : "#C7C7CC"}
-        />
-      </TouchableOpacity>
-
-      {/* Panel de controles */}
-      <View style={styles.controls}>
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl
-              refreshing={refreshing}
-              onRefresh={onRefresh}
-              tintColor="#007AFF"
-            />
-          }
+      {/* ✅ BOTONES FLOTANTES MEJORADOS */}
+      <View style={mapStyles.floatingButtons}>
+        {/* Botón para expandir/contraer mapa */}
+        <TouchableOpacity
+          style={mapStyles.expandButton}
+          onPress={toggleMapExpansion}
         >
-          {/* Header */}
-          <View style={styles.header}>
-            <View>
-              <Text style={styles.title}>
-                👋 Hola, {user?.email || "Driver"}
-              </Text>
-              <Text style={styles.subtitle}>Vehículo: {vehicleId}</Text>
-            </View>
-            <TouchableOpacity
-              onPress={handleLogout}
-              style={styles.logoutButton}
-            >
-              <Ionicons name="log-out-outline" size={24} color="#FF3B30" />
-            </TouchableOpacity>
-          </View>
+          <Ionicons
+            name={isMapExpanded ? "contract" : "expand"}
+            size={24}
+            color="#007AFF"
+          />
+        </TouchableOpacity>
 
-          {/* Estados */}
-          <View style={styles.statusSection}>
-            <View style={styles.statusItem}>
-              <View
-                style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor: isConnected ? "#34C759" : "#FF3B30",
-                  },
-                ]}
+        {/* Botón para centrar mapa */}
+        <TouchableOpacity
+          style={mapStyles.centerButton}
+          onPress={centerMapOnCurrentLocation}
+          disabled={!currentLocation}
+        >
+          <Ionicons
+            name="locate"
+            size={24}
+            color={currentLocation ? "#007AFF" : "#C7C7CC"}
+          />
+        </TouchableOpacity>
+      </View>
+
+      {/* ✅ PANEL DE CONTROLES - SE OCULTA CUANDO MAPA ESTÁ EXPANDIDO */}
+      {!isMapExpanded && (
+        <View
+          className="absolute bottom-0 left-0 right-0 bg-white rounded-tl-3xl rounded-tr-3xl shadow-2xl"
+          style={{ maxHeight: height * 0.7 }}
+        >
+          <ScrollView
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor="#007AFF"
               />
-              <Text style={styles.statusText}>{connectionStatus}</Text>
-            </View>
-
-            <View style={styles.statusItem}>
-              <View
-                style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor: isTracking ? "#34C759" : "#8E8E93",
-                  },
-                ]}
-              />
-              <Text style={styles.statusText}>
-                Tracking: {isTracking ? "Activo" : "Inactivo"}
-              </Text>
-            </View>
-
-            <View style={styles.statusItem}>
-              <View
-                style={[
-                  styles.statusDot,
-                  {
-                    backgroundColor:
-                      permissionStatus === "granted" ? "#34C759" : "#FF9500",
-                  },
-                ]}
-              />
-              <Text style={styles.statusText}>
-                GPS:{" "}
-                {permissionStatus === "granted" ? "Autorizado" : "Sin permisos"}
-              </Text>
-            </View>
-          </View>
-
-          {/* Estadísticas de sesión */}
-          {sessionStats.isActive && (
-            <View style={styles.statsSection}>
-              <Text style={styles.sectionTitle}>📊 Estadísticas de Sesión</Text>
-              <View style={styles.statsGrid}>
-                <View style={styles.statItem}>
-                  <Text style={styles.statNumber}>
-                    {sessionStats.totalLocationsSent}
-                  </Text>
-                  <Text style={styles.statLabel}>Ubicaciones</Text>
-                </View>
-                <View style={styles.statItem}>
-                  <Text style={styles.statNumber}>{getSessionDuration()}</Text>
-                  <Text style={styles.statLabel}>Duración</Text>
-                </View>
-                <View style={styles.statItem}>
-                  <Text style={styles.statNumber}>
-                    {sessionStats.avgAccuracy.toFixed(0)}m
-                  </Text>
-                  <Text style={styles.statLabel}>Precisión Avg</Text>
-                </View>
-                <View style={styles.statItem}>
-                  <Text style={styles.statNumber}>
-                    {(sessionStats.totalDistance / 1000).toFixed(1)}km
-                  </Text>
-                  <Text style={styles.statLabel}>Distancia</Text>
-                </View>
-              </View>
-            </View>
-          )}
-
-          {/* Controles principales */}
-          <View style={styles.controlsSection}>
-            {/* Conexión */}
-            <TouchableOpacity
-              style={[
-                styles.button,
-                isConnected ? styles.buttonSecondary : styles.buttonPrimary,
-                isConnecting && styles.buttonDisabled,
-              ]}
-              onPress={isConnected ? disconnectFromServer : connectToServer}
-              disabled={isConnecting}
-            >
-              <Ionicons
-                name={isConnected ? "wifi-off" : "wifi"}
-                size={20}
-                color="#fff"
-                style={styles.buttonIcon}
-              />
-              <Text style={styles.buttonText}>
-                {isConnecting
-                  ? "Conectando..."
-                  : isConnected
-                    ? "🔌 Desconectar"
-                    : "📡 Conectar al Servidor"}
-              </Text>
-            </TouchableOpacity>
-
-            {/* Tracking GPS */}
-            <TouchableOpacity
-              style={[
-                styles.button,
-                isTracking ? styles.buttonDanger : styles.buttonSuccess,
-                !isConnected && styles.buttonDisabled,
-              ]}
-              onPress={isTracking ? stopTracking : startTracking}
-              disabled={!isConnected || permissionStatus !== "granted"}
-            >
-              <Ionicons
-                name={isTracking ? "pause" : "play"}
-                size={20}
-                color="#fff"
-                style={styles.buttonIcon}
-              />
-              <Text style={styles.buttonText}>
-                {isTracking ? "⏹️ Detener Tracking" : "🚀 Iniciar Tracking GPS"}
-              </Text>
-            </TouchableOpacity>
-
-            {/* Configuración de intervalo */}
-            {!isTracking && (
-              <View style={styles.intervalSection}>
-                <Text style={styles.intervalLabel}>
-                  Intervalo de envío: {trackingInterval}s
+            }
+          >
+            {/* Header */}
+            <View className="flex-row justify-between items-center p-5 pb-3 border-b border-gray-100">
+              <View>
+                <Text className="text-xl font-bold text-gray-800">
+                  👋 Hola, {user?.email || "Driver"}
                 </Text>
-                <View style={styles.intervalButtons}>
-                  {[2, 5, 10, 15, 30].map((interval) => (
-                    <TouchableOpacity
-                      key={interval}
-                      style={[
-                        styles.intervalButton,
-                        trackingInterval === interval &&
-                          styles.intervalButtonActive,
-                      ]}
-                      onPress={() => setTrackingInterval(interval)}
-                    >
-                      <Text
-                        style={[
-                          styles.intervalButtonText,
-                          trackingInterval === interval &&
-                            styles.intervalButtonTextActive,
-                        ]}
-                      >
-                        {interval}s
-                      </Text>
-                    </TouchableOpacity>
-                  ))}
-                </View>
-              </View>
-            )}
-          </View>
-
-          {/* Acciones adicionales */}
-          <View style={styles.actionsSection}>
-            <TouchableOpacity
-              style={[
-                styles.actionButton,
-                styles.actionButtonPrimary,
-                !isConnected && styles.buttonDisabled,
-              ]}
-              onPress={sendCurrentLocationManually}
-              disabled={!isConnected}
-            >
-              <Ionicons name="navigate" size={18} color="#007AFF" />
-              <Text style={styles.actionButtonText}>
-                📍 Enviar Ubicación Manual
-              </Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.actionButton, styles.actionButtonSecondary]}
-              onPress={useCartagenaTestLocation}
-            >
-              <Ionicons name="location" size={18} color="#F6AD55" />
-              <Text style={styles.actionButtonText}>
-                🏖️ Ubicación de Prueba (Cartagena)
-              </Text>
-            </TouchableOpacity>
-
-            {sentLocations.length > 0 && (
-              <TouchableOpacity
-                style={[styles.actionButton, styles.actionButtonDanger]}
-                onPress={clearHistory}
-              >
-                <Ionicons name="trash" size={18} color="#FF3B30" />
-                <Text style={styles.actionButtonText}>
-                  🗑️ Limpiar Historial
+                <Text className="text-sm text-gray-600 mt-1">
+                  Vehículo: {vehicleId}
                 </Text>
+              </View>
+              <TouchableOpacity onPress={handleLogout} className="p-2">
+                <Ionicons name="log-out-outline" size={24} color="#FF3B30" />
               </TouchableOpacity>
-            )}
-          </View>
+            </View>
 
-          {/* Historial de ubicaciones */}
-          {sentLocations.length > 0 && (
-            <View style={styles.historySection}>
-              <Text style={styles.sectionTitle}>
-                📍 Últimas Ubicaciones ({sentLocations.length})
-              </Text>
-              {sentLocations.slice(0, 5).map((location, index) => (
-                <View key={location.id} style={styles.historyItem}>
-                  <View style={styles.historyHeader}>
-                    <Text style={styles.historyType}>
-                      {location.type === "manual"
-                        ? "🎯 Manual"
-                        : location.type === "test"
-                          ? "🏖️ Prueba"
-                          : "📍 Auto"}
+            {/* Estados con indicadores */}
+            <View className="p-5 pb-4">
+              <View className="flex-row items-center mb-2">
+                <View
+                  className={`w-2 h-2 rounded-full mr-3 ${isConnected ? "bg-green-500" : "bg-red-500"}`}
+                />
+                <Text className="text-sm text-gray-700">
+                  {connectionStatus}
+                </Text>
+              </View>
+
+              <View className="flex-row items-center mb-2">
+                <View
+                  className={`w-2 h-2 rounded-full mr-3 ${isTracking ? "bg-green-500" : "bg-gray-400"}`}
+                />
+                <Text className="text-sm text-gray-700">
+                  GPS Tracking: {isTracking ? "Activo" : "Inactivo"}
+                </Text>
+              </View>
+
+              <View className="flex-row items-center mb-2">
+                <View
+                  className={`w-2 h-2 rounded-full mr-3 ${isGeneratingRandomData ? "bg-orange-500" : "bg-gray-400"}`}
+                />
+                <Text className="text-sm text-gray-700">
+                  Datos Aleatorios:{" "}
+                  {isGeneratingRandomData ? "Generando" : "Inactivo"}
+                </Text>
+              </View>
+
+              <View className="flex-row items-center">
+                <View
+                  className={`w-2 h-2 rounded-full mr-3 ${permissionStatus === "granted" ? "bg-green-500" : "bg-yellow-500"}`}
+                />
+                <Text className="text-sm text-gray-700">
+                  GPS:{" "}
+                  {permissionStatus === "granted"
+                    ? "Autorizado"
+                    : "Sin permisos"}
+                </Text>
+              </View>
+            </View>
+
+            {/* Estadísticas de sesión */}
+            {sessionStats.isActive && (
+              <View className="px-5 pb-4">
+                <Text className="text-base font-bold text-gray-800 mb-4">
+                  📊 Estadísticas de Sesión
+                </Text>
+                <View className="flex-row justify-around">
+                  <View className="items-center">
+                    <Text className="text-lg font-bold text-blue-600">
+                      {sessionStats.totalLocationsSent}
                     </Text>
-                    <Text style={styles.historyTime}>
-                      {new Date(location.timestamp).toLocaleTimeString()}
+                    <Text className="text-xs text-gray-600 mt-1">
+                      Ubicaciones
                     </Text>
                   </View>
-                  <Text style={styles.historyCoords}>
-                    {location.latitude.toFixed(4)},{" "}
-                    {location.longitude.toFixed(4)}
-                  </Text>
-                  {location.accuracy && (
-                    <Text style={styles.historyAccuracy}>
-                      Precisión: ±{Math.round(location.accuracy)}m
+                  <View className="items-center">
+                    <Text className="text-lg font-bold text-blue-600">
+                      {sessionStats.randomDataGenerated}
                     </Text>
-                  )}
+                    <Text className="text-xs text-gray-600 mt-1">
+                      Aleatorias
+                    </Text>
+                  </View>
+                  <View className="items-center">
+                    <Text className="text-lg font-bold text-blue-600">
+                      {getSessionDuration()}
+                    </Text>
+                    <Text className="text-xs text-gray-600 mt-1">Duración</Text>
+                  </View>
+                  <View className="items-center">
+                    <Text className="text-lg font-bold text-blue-600">
+                      {(sessionStats.totalDistance / 1000).toFixed(1)}km
+                    </Text>
+                    <Text className="text-xs text-gray-600 mt-1">
+                      Distancia
+                    </Text>
+                  </View>
                 </View>
-              ))}
-            </View>
-          )}
+              </View>
+            )}
 
-          {/* Información de permisos */}
-          {permissionStatus !== "granted" && (
-            <View style={styles.permissionSection}>
-              <Text style={styles.permissionTitle}>
-                ⚠️ Permisos de Ubicación
-              </Text>
-              <Text style={styles.permissionText}>
-                Para usar todas las funciones, necesitas conceder permisos de
-                ubicación.
-              </Text>
+            {/* Controles principales */}
+            <View className="px-5 pb-4">
+              {/* Conexión */}
               <TouchableOpacity
-                style={[styles.button, styles.buttonWarning]}
-                onPress={requestLocationPermissions}
+                className={`flex-row items-center justify-center py-3.5 px-4 rounded-xl mb-3 ${
+                  isConnected ? "bg-gray-500" : "bg-blue-500"
+                } ${isConnecting ? "bg-gray-300" : ""}`}
+                onPress={isConnected ? disconnectFromServer : connectToServer}
+                disabled={isConnecting}
+              >
+                <Ionicons size={20} color="#fff" style={{ marginRight: 8 }} />
+                <Text className="text-white text-base font-semibold">
+                  {isConnecting
+                    ? "Conectando..."
+                    : isConnected
+                      ? "🔌 Desconectar"
+                      : "📡 Conectar al Servidor"}
+                </Text>
+              </TouchableOpacity>
+
+              {/* Tracking GPS */}
+              <TouchableOpacity
+                className={`flex-row items-center justify-center py-3.5 px-4 rounded-xl mb-3 ${
+                  isTracking ? "bg-red-500" : "bg-green-500"
+                } ${!isConnected || permissionStatus !== "granted" ? "bg-gray-300" : ""}`}
+                onPress={isTracking ? stopTracking : startTracking}
+                disabled={!isConnected || permissionStatus !== "granted"}
               >
                 <Ionicons
-                  name="location"
+                  name={isTracking ? "pause" : "play"}
                   size={20}
                   color="#fff"
-                  style={styles.buttonIcon}
+                  style={{ marginRight: 8 }}
                 />
-                <Text style={styles.buttonText}>🔓 Solicitar Permisos</Text>
+                <Text className="text-white text-base font-semibold">
+                  {isTracking
+                    ? "⏹️ Detener GPS Tracking"
+                    : "🚀 Iniciar GPS Tracking"}
+                </Text>
               </TouchableOpacity>
-            </View>
-          )}
 
-          {/* Espacio adicional para scroll */}
-          <View style={{ height: 20 }} />
-        </ScrollView>
-      </View>
+              {/* Datos Aleatorios */}
+              <TouchableOpacity
+                className={`flex-row items-center justify-center py-3.5 px-4 rounded-xl mb-3 ${
+                  isGeneratingRandomData ? "bg-red-500" : "bg-orange-500"
+                } ${!isConnected ? "bg-gray-300" : ""}`}
+                onPress={
+                  isGeneratingRandomData
+                    ? stopRandomDataGeneration
+                    : startRandomDataGeneration
+                }
+                disabled={!isConnected}
+              >
+                <Ionicons
+                  name={isGeneratingRandomData ? "stop" : "shuffle"}
+                  size={20}
+                  color="#fff"
+                  style={{ marginRight: 8 }}
+                />
+                <Text className="text-white text-base font-semibold">
+                  {isGeneratingRandomData
+                    ? "🛑 Detener Datos Aleatorios"
+                    : "🎲 Iniciar Datos Aleatorios"}
+                </Text>
+              </TouchableOpacity>
+
+              {/* Configuración de intervalos */}
+              {!isTracking && !isGeneratingRandomData && (
+                <View className="mt-3 mb-3">
+                  <Text className="text-sm text-gray-700 mb-3 text-center">
+                    Intervalos de envío
+                  </Text>
+                  <View className="flex-row justify-around mb-3">
+                    <Text className="text-xs text-gray-600">
+                      GPS: {trackingInterval}s
+                    </Text>
+                    <Text className="text-xs text-gray-600">
+                      Random: {randomDataInterval}s
+                    </Text>
+                  </View>
+                  <View className="flex-row justify-around">
+                    {[2, 3, 5, 10].map((interval) => (
+                      <TouchableOpacity
+                        key={interval}
+                        className={`py-2 px-3 rounded-lg ${
+                          trackingInterval === interval
+                            ? "bg-blue-500"
+                            : "bg-gray-200"
+                        }`}
+                        onPress={() => {
+                          setTrackingInterval(interval);
+                          setRandomDataInterval(interval);
+                        }}
+                      >
+                        <Text
+                          className={`text-sm ${
+                            trackingInterval === interval
+                              ? "text-white font-semibold"
+                              : "text-gray-700"
+                          }`}
+                        >
+                          {interval}s
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+            </View>
+
+            {/* Acciones adicionales */}
+            <View className="px-5 pb-4">
+              <TouchableOpacity
+                className={`flex-row items-center py-3 px-4 rounded-lg mb-2 bg-blue-50 border border-blue-200 ${
+                  !isConnected ? "bg-gray-100 border-gray-200" : ""
+                }`}
+                onPress={sendCurrentLocationManually}
+                disabled={!isConnected}
+              >
+                <Ionicons name="navigate" size={18} color="#007AFF" />
+                <Text className="text-blue-700 ml-2 text-sm">
+                  📍 Enviar Ubicación Manual
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                className="flex-row items-center py-3 px-4 rounded-lg mb-2 bg-yellow-50 border border-yellow-200"
+                onPress={useCartagenaTestLocation}
+              >
+                <Ionicons name="location" size={18} color="#F6AD55" />
+                <Text className="text-yellow-700 ml-2 text-sm">
+                  🏖️ Ubicación de Prueba (Cartagena)
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                className={`flex-row items-center py-3 px-4 rounded-lg mb-2 bg-purple-50 border border-purple-200 ${
+                  !isConnected ? "bg-gray-100 border-gray-200" : ""
+                }`}
+                onPress={generateAndSendRandomRoute}
+                disabled={!isConnected}
+              >
+                <Ionicons name="map" size={18} color="#9F7AEA" />
+                <Text className="text-purple-700 ml-2 text-sm">
+                  🗺️ Generar Ruta Aleatoria
+                </Text>
+              </TouchableOpacity>
+
+              {sentLocations.length > 0 && (
+                <TouchableOpacity
+                  className="flex-row items-center py-3 px-4 rounded-lg mb-2 bg-red-50 border border-red-200"
+                  onPress={clearHistory}
+                >
+                  <Ionicons name="trash" size={18} color="#FF3B30" />
+                  <Text className="text-red-700 ml-2 text-sm">
+                    🗑️ Limpiar Historial
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {/* Historial de ubicaciones */}
+            {sentLocations.length > 0 && (
+              <View className="px-5 pb-4">
+                <Text className="text-base font-bold text-gray-800 mb-4">
+                  📍 Últimas Ubicaciones ({sentLocations.length})
+                </Text>
+                {sentLocations.slice(0, 5).map((location, index) => (
+                  <View
+                    key={location.id}
+                    className="bg-gray-50 p-3 rounded-lg mb-2"
+                  >
+                    <View className="flex-row justify-between items-center mb-1">
+                      <Text className="text-xs font-bold text-gray-800">
+                        {location.type === "manual"
+                          ? "🎯 Manual"
+                          : location.type === "test"
+                            ? "🏖️ Prueba"
+                            : location.type === "random"
+                              ? "🎲 Aleatoria"
+                              : "📍 Auto"}
+                      </Text>
+                      <Text className="text-xs text-gray-600">
+                        {new Date(location.timestamp).toLocaleTimeString()}
+                      </Text>
+                    </View>
+                    <Text className="text-sm text-blue-600 font-mono">
+                      {location.latitude.toFixed(4)},{" "}
+                      {location.longitude.toFixed(4)}
+                    </Text>
+                    {location.accuracy && (
+                      <Text className="text-xs text-gray-600 mt-1">
+                        Precisión: ±{Math.round(location.accuracy)}m
+                      </Text>
+                    )}
+                    {location.speed && (
+                      <Text className="text-xs text-gray-600">
+                        Velocidad: {Math.round(location.speed * 3.6)} km/h
+                      </Text>
+                    )}
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Sección de permisos */}
+            {permissionStatus !== "granted" && (
+              <View className="mx-5 p-4 bg-yellow-50 border border-yellow-200 rounded-xl mb-4">
+                <Text className="text-base font-bold text-yellow-800 mb-2">
+                  ⚠️ Permisos de Ubicación Requeridos
+                </Text>
+                <Text className="text-sm text-yellow-700 mb-4 leading-5">
+                  Para usar el tracking GPS necesitas conceder permisos de
+                  ubicación. Esto te permitirá enviar tu posición en tiempo
+                  real.
+                </Text>
+                <TouchableOpacity
+                  className="flex-row items-center justify-center py-3 px-4 bg-yellow-500 rounded-lg mb-2"
+                  onPress={requestLocationPermissions}
+                >
+                  <Ionicons
+                    name="location"
+                    size={20}
+                    color="#fff"
+                    style={{ marginRight: 8 }}
+                  />
+                  <Text className="text-white text-base font-semibold">
+                    🔓 Solicitar Permisos
+                  </Text>
+                </TouchableOpacity>
+                <Text className="text-xs text-yellow-600 text-center">
+                  Los permisos son necesarios para el funcionamiento de la app
+                </Text>
+              </View>
+            )}
+
+            {/* Espacio adicional para scroll */}
+            <View className="h-5" />
+          </ScrollView>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: "#f5f5f5",
-  },
+// ✅ ESTILOS ACTUALIZADOS PARA MAPA EXPANDIBLE
+const mapStyles = StyleSheet.create({
   map: {
     flex: 1,
+    width: "100%",
+    height: "100%",
   },
-  centerButton: {
+  // ✅ NUEVO: Estilo para mapa expandido (pantalla completa)
+  mapExpanded: {
     position: "absolute",
-    top: 60,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    width: "100%",
+    height: "100%",
+    zIndex: 999,
+  },
+  // ✅ CONTENEDOR PARA BOTONES FLOTANTES
+  floatingButtons: {
+    position: "absolute",
+    top: 40,
     right: 20,
+    flexDirection: "column",
+    gap: 10,
+    zIndex: 1000,
+  },
+  // ✅ NUEVO: Botón para expandir mapa
+  expandButton: {
     backgroundColor: "white",
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     justifyContent: "center",
     alignItems: "center",
     shadowColor: "#000",
@@ -1037,245 +1401,17 @@ const styles = StyleSheet.create({
     shadowRadius: 3.84,
     elevation: 5,
   },
-  controls: {
-    position: "absolute",
-    bottom: 0,
-    left: 0,
-    right: 0,
+  centerButton: {
     backgroundColor: "white",
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    maxHeight: height * 0.7,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: "center",
+    alignItems: "center",
     shadowColor: "#000",
-    shadowOffset: { width: 0, height: -2 },
-    shadowOpacity: 0.1,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
     shadowRadius: 3.84,
     elevation: 5,
-  },
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: 20,
-    paddingBottom: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "#f0f0f0",
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: "#333",
-  },
-  subtitle: {
-    fontSize: 14,
-    color: "#666",
-    marginTop: 2,
-  },
-  logoutButton: {
-    padding: 8,
-  },
-  statusSection: {
-    padding: 20,
-    paddingTop: 15,
-    paddingBottom: 15,
-  },
-  statusItem: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginBottom: 8,
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 10,
-  },
-  statusText: {
-    fontSize: 14,
-    color: "#666",
-  },
-  statsSection: {
-    padding: 20,
-    paddingTop: 0,
-    paddingBottom: 10,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#333",
-    marginBottom: 15,
-  },
-  statsGrid: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-  },
-  statItem: {
-    alignItems: "center",
-  },
-  statNumber: {
-    fontSize: 18,
-    fontWeight: "bold",
-    color: "#007AFF",
-  },
-  statLabel: {
-    fontSize: 12,
-    color: "#666",
-    marginTop: 2,
-  },
-  controlsSection: {
-    padding: 20,
-    paddingTop: 10,
-  },
-  button: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderRadius: 12,
-    marginBottom: 12,
-  },
-  buttonPrimary: {
-    backgroundColor: "#007AFF",
-  },
-  buttonSecondary: {
-    backgroundColor: "#8E8E93",
-  },
-  buttonSuccess: {
-    backgroundColor: "#34C759",
-  },
-  buttonDanger: {
-    backgroundColor: "#FF3B30",
-  },
-  buttonWarning: {
-    backgroundColor: "#FF9500",
-  },
-  buttonDisabled: {
-    backgroundColor: "#C7C7CC",
-  },
-  buttonIcon: {
-    marginRight: 8,
-  },
-  buttonText: {
-    color: "#fff",
-    fontSize: 16,
-    fontWeight: "600",
-  },
-  intervalSection: {
-    marginTop: 10,
-    marginBottom: 10,
-  },
-  intervalLabel: {
-    fontSize: 14,
-    color: "#666",
-    marginBottom: 10,
-    textAlign: "center",
-  },
-  intervalButtons: {
-    flexDirection: "row",
-    justifyContent: "space-around",
-  },
-  intervalButton: {
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    backgroundColor: "#f0f0f0",
-  },
-  intervalButtonActive: {
-    backgroundColor: "#007AFF",
-  },
-  intervalButtonText: {
-    fontSize: 14,
-    color: "#666",
-  },
-  intervalButtonTextActive: {
-    color: "#fff",
-    fontWeight: "600",
-  },
-  actionsSection: {
-    padding: 20,
-    paddingTop: 0,
-  },
-  actionButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 10,
-    marginBottom: 8,
-    borderWidth: 1,
-  },
-  actionButtonPrimary: {
-    backgroundColor: "#f0f8ff",
-    borderColor: "#007AFF",
-  },
-  actionButtonSecondary: {
-    backgroundColor: "#fff8f0",
-    borderColor: "#F6AD55",
-  },
-  actionButtonDanger: {
-    backgroundColor: "#fff0f0",
-    borderColor: "#FF3B30",
-  },
-  actionButtonText: {
-    fontSize: 14,
-    marginLeft: 8,
-    color: "#333",
-  },
-  historySection: {
-    padding: 20,
-    paddingTop: 0,
-  },
-  historyItem: {
-    backgroundColor: "#f8f9fa",
-    padding: 12,
-    borderRadius: 10,
-    marginBottom: 8,
-  },
-  historyHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 4,
-  },
-  historyType: {
-    fontSize: 12,
-    fontWeight: "bold",
-    color: "#333",
-  },
-  historyTime: {
-    fontSize: 11,
-    color: "#666",
-  },
-  historyCoords: {
-    fontSize: 13,
-    color: "#007AFF",
-    fontFamily: "monospace",
-  },
-  historyAccuracy: {
-    fontSize: 11,
-    color: "#666",
-    marginTop: 2,
-  },
-  permissionSection: {
-    padding: 20,
-    paddingTop: 0,
-    backgroundColor: "#fff9e6",
-    margin: 20,
-    borderRadius: 12,
-    borderWidth: 1,
-    borderColor: "#FFD60A",
-  },
-  permissionTitle: {
-    fontSize: 16,
-    fontWeight: "bold",
-    color: "#B25000",
-    marginBottom: 8,
-  },
-  permissionText: {
-    fontSize: 14,
-    color: "#B25000",
-    marginBottom: 15,
-    lineHeight: 20,
   },
 });
